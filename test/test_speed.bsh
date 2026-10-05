@@ -108,15 +108,17 @@ System.out.println("  结论：" + (reuseConnect < 80 ? "✓ 第2次握手 <80ms
 System.out.println("\n=== 2. 预判：长按那一刻就开算 ===");
 preDone.clear();
 preBusy.clear();
+preDoneAt.clear();
 FakeMsg m = new FakeMsg();
 m.talker = "wxid_abc"; m.sendTalker = "wxid_abc"; m.content = sample;
 long tp0 = System.currentTimeMillis();
 prefetchStart(m, sample);
-String got = prefetchTake(sample, 4000);
+String got = prefetchTake(preKey(m, sample), 4000);   // v1.9.1 起键 = 会话|文本
 long tp1 = System.currentTimeMillis();
 System.out.println("  预判取回 " + (got == null ? "null ✗" : "成功 ✓（" + got.length() + " 字节）"));
 System.out.println("  prefetchTake 等待 " + (tp1 - tp0) + "ms（越小越好：结果早就备好了）");
 if (got != null) System.out.println("  预判里的情绪 = " + fieldAfter(got, "emotion", "choice"));
+if (got != null) System.out.println("  预判键隔离 = " + (prefetchTake(preKey(m, sample), 10) == null ? "✓ 取走即清" : "✗ 没清"));
 
 System.out.println("\n=== 3. 缓存：同一条消息再看一眼 ===");
 resCache.clear(); resCacheOrder.clear();

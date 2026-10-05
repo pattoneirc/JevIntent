@@ -48,7 +48,7 @@
    - **不改文件**：等插件第一次长按生成了 `设置.properties`，直接在最上面的 **【1】接口密钥** 后面写 `apikey_你的key`
      （两边都填以 `设置.properties` 为准；那边留空就回落到 `config.properties`）
 
-4. 插件管理器里**启用并重载**（或重启微信）→ 看到 Toast「JevIntent 就绪 v1.8」就成功了。
+4. 插件管理器里**启用并重载**（或重启微信）→ 看到 Toast「JevIntent 就绪 v1.9」就成功了。
 5. 在任意聊天里**长按一条文本消息**（引用回复的消息也支持）→ 菜单出现「意图」。
 
 > ⚠️ 仓库里**不含任何密钥**。`config.properties`、`设置.properties`、`presets.properties`
@@ -73,7 +73,7 @@
 
 | 现象 | 含义 |
 |---|---|
-| 重载后 Toast **「JevIntent 就绪 v1.8」** | 插件加载成功 ✅ |
+| 重载后 Toast **「JevIntent 就绪 v1.9」** | 插件加载成功 ✅ |
 | 长按消息**没有**「意图」 | 插件没加载 / 没配 key / 这条不是文本消息（图片语音视频不给菜单） |
 | 点「意图」后 Toast「还没读到 api_key」 | 去 `设置.properties` 的【1】接口密钥 或 `config.properties` 填 key |
 

@@ -1,0 +1,77 @@
+// test_prekey.bsh —— v1.9.1 预判链路离线验证（对着本机 mock 端点，不花钱）
+// 先起 mock：python mock_jev.py   （127.0.0.1:8901；没起就整体跳过）
+PLUGIN = "../"; BASE = "./";
+pluginPath = BASE + "tmpcfg/";
+
+// mock 没起就别跑了（预判测试全靠它）
+mockUp = false;
+try {
+    java.net.HttpURLConnection probe = (java.net.HttpURLConnection) new java.net.URL("http://127.0.0.1:8901/").openConnection();
+    probe.setConnectTimeout(500);
+    probe.setRequestMethod("POST"); probe.setDoOutput(true);
+    probe.connect();
+    mockUp = probe.getResponseCode() > 0;
+    probe.disconnect();
+} catch (Throwable t) { mockUp = false; }
+if (!mockUp) { System.out.println("mock 端点(127.0.0.1:8901)没起：python mock_jev.py —— 跳过本测试"); return; }
+
+menuItems = new java.util.ArrayList();
+addMenuItem(String t, String p, Object a) { menuItems.add(t); }
+toastCount = 0;
+toast(String s) { toastCount++; System.out.println("[toast#" + toastCount + "] " + s); }
+log(String s) { System.out.println("[log] " + s); }
+sendText(String t, String s) { System.out.println("[sendText → " + t + "] " + s); }
+sendXml(String t, String x, int ty) { }
+getMsgs(String t, long f) { return new java.util.ArrayList(); }
+sendResult(Object m, String out) { System.out.println("[sendResult] " + out.substring(0, java.lang.Math.min(60, out.length()))); }
+
+// 1) 指向本机 mock 的配置（http://127. 允许明文 —— 正好也验证这个放行分支）
+new java.io.File(pluginPath).mkdirs();
+writeCfg = new java.io.FileOutputStream(pluginPath + "config.properties");
+writeCfg.write(("api_key=fake-key-1234567890-abcdef-0987654321-fedcba\nendpoint=http://127.0.0.1:8901/\nmodel=jev-latest\ncontext_count=0\n").getBytes("UTF-8"));
+writeCfg.close();
+
+System.out.println("=== source main.test.bsh ===");
+source("main.test.bsh");
+loadConfig();   // 读 tmpcfg 里那份指向 mock 的配置
+System.out.println("  api_key 长度 = " + cfg("api_key").length() + "，endpoint = " + cfg("endpoint"));
+
+System.out.println("=== 1. prefetchStart 全链路（真打 mock 端点）===");
+FakeMsg a = new FakeMsg(); a.talker = "wxid_chat_a"; a.content = "测试消息";
+prefetchStart(a, "测试消息");
+String got = prefetchTake(preKey(a, "测试消息"), 5000);
+if (got == null) {
+    System.out.println("  预判取回 = null ✗");
+} else {
+    System.out.println("  预判取回 = ✓ " + got.length() + " 字节");
+    System.out.println("  情绪答案 = " + fieldAfter(got, "emotion", "choice"));
+}
+
+System.out.println("=== 2. 跨聊天键隔离（B 聊天同文本不应拿到 A 的预判）===");
+FakeMsg b = new FakeMsg(); b.talker = "wxid_chat_b"; b.content = "测试消息";
+long t0 = System.currentTimeMillis();
+String leaked = prefetchTake(preKey(b, "测试消息"), 300);
+System.out.println("  B 取回 = " + (leaked == null ? "null ✓（没串）" : "✗ 串到了：" + leaked.length()));
+
+System.out.println("=== 3. TTL 失效（把时间戳改成过期再取）===");
+prefetchStart(a, "另一条");
+String k = preKey(a, "另一条");
+// 直接等预判落进 preDone，再人为把时间戳拨老
+int waited = 0;
+while (preDone.get(k) == null && waited < 5000) { Thread.sleep(50); waited += 50; }
+preDoneAt.put(k, String.valueOf(System.currentTimeMillis() - 100000));
+String stale = prefetchTake(k, 100);
+System.out.println("  过期取回 = " + (stale == null ? "null ✓（TTL 生效）" : "✗ 没失效"));
+
+System.out.println("=== 4. 明文 http 拦截（非内网地址应被拒）===");
+try {
+    httpPost("http://example.com/x", "fake-key-1234567890-abcdef-0987654321-fedcba", "{}", 1000);
+    System.out.println("  ✗ 没拦住");
+} catch (Throwable t) {
+    System.out.println("  ✓ 拦截：" + t.getMessage());
+}
+
+System.out.println("=== 5. preBusy 不残留（都跑完后应全空）===");
+Thread.sleep(300);
+System.out.println("  preBusy.size = " + preBusy.size() + (preBusy.size() == 0 ? " ✓" : " ✗"));
+System.out.println("=== 结束 ===");

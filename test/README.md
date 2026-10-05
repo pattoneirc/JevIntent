@@ -30,6 +30,11 @@ python lex_audit.py
 # 3) 提交前自检：仓库里不允许出现密钥/账号（会检查是否误留 config.properties）
 python check_secrets.py
 
+# 3.5) v1.9.1 预判链路专项（对着本机 mock 端点，不花钱、不需要真 key）
+#     先另开一个终端把 mock 跑起来，没起的话测试会自己跳过
+python mock_jev.py        # 终端 A
+java -cp "bsh-2.0b6.jar;." bsh.Interpreter test_prekey.bsh   # 终端 B
+
 # 3) 设置文件 + 菜单 + 关系循环（离线；真调 API 的那步由 RUN_LIVE 控制）
 java -cp "bsh-2.0b6.jar;." bsh.Interpreter test_settings.bsh
 
@@ -68,6 +73,8 @@ $env:JAVA_TOOL_OPTIONS='-Dfile.encoding=UTF-8'
 | `test_settings.bsh` | 设置文件生成 / A-B-C 生效 / 写错字母兜底 / 菜单项 / 关系循环 |
 | `test_quote.bsh` | 引用消息能长按、图片不给菜单等回归 |
 | `test_speed.bsh` | v1.9 速度专项：连接复用（第二次握手应 <80ms）、预判提前取回、缓存 40 条上限 |
+| `test_prekey.bsh` | v1.9.1 预判链路专项：prefetchStart 全链路（打 mock）、跨聊天键隔离、TTL 失效、明文 http 拦截、preBusy 不残留 |
+| `mock_jev.py` | 本机假 Jev 端点（127.0.0.1:8901），给 test_prekey.bsh 用，不花真钱 |
 | `FakeMsg.java` | 假消息对象（普通文本） |
 | `FakeMsgQuote.java` | 假消息对象（带引用块） |
 

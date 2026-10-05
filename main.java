@@ -71,12 +71,16 @@ pendingMsg = null;
 //   · 服务端算完 ~250~330ms，是唯一的大头；客户端连接只要 3~15ms（TLS 会话复用已生效）
 //   · 所以「省握手」没用，「把等待藏起来」才有用 → 长按菜单弹出时就把这次分析先发出去
 //   · 尖刺（1.5~1.8s）来自服务端抖动，只能靠重试/预判消化
-/** 预判完成的响应体：消息文本 → 响应 JSON */
+/** 预判完成的响应体：会话|消息文本 → 响应 JSON（v1.9.1 起键带上会话，防止两个聊天同文本互相串结果） */
 Hashtable preDone = new Hashtable();
-/** 预判进行中：消息文本 → 开始时间戳 */
+/** 预判进行中：会话|消息文本 → 开始时间戳 */
 Hashtable preBusy = new Hashtable();
+/** 预判完成的时间戳（毫秒，存字符串）：配合 PRE_TTL_MS 做过期，没有它预判结果能被几小时前的旧响应顶上 */
+Hashtable preDoneAt = new Hashtable();
 /** 预判结果的有效期（毫秒） */
 long PRE_TTL_MS = 90000L;
+/** 预判缓存的最大条数：长按了不点也算一次预判，不设上限的话 preDone 会随时间无限长大 */
+int PRE_MAX = 12;
 /** 最终输出缓存：state 键 → 结果文本（长按同一条消息反复看时秒回） */
 Hashtable resCache = new Hashtable();
 /** 缓存淘汰顺序 + 上限 */
@@ -121,18 +125,17 @@ void scanDirs(List l, String base) {
     File[] fs = d.listFiles();
     cfgDirs = cfgDirs + (cfgDirs.length() > 0 ? ", " : "") + base + "(" + (fs == null ? "null" : String.valueOf(fs.length)) + "项)";
     if (fs == null) return;
-    // 两轮：先挑名字里带 jev 的目录（避免误读别的插件的 config），再兜底扫其余目录
-    for (int pass = 0; pass < 2; pass++) {
-        for (int i = 0; i < fs.length; i++) {
-            if (!fs[i].isDirectory()) continue;
-            String sub = fs[i].getAbsolutePath();
-            boolean looksJev = sub.toLowerCase().indexOf("jev") >= 0;
-            if (pass == 0 && !looksJev) continue;
-            if (pass == 1 && looksJev) continue;
-            addCand(l, sub + "/config.properties");
-            addCand(l, sub + "/config.properties.txt");
-            addCand(l, sub + "/config.txt");
-        }
+    // 只认名字里带 jev 的目录（v1.9.1 收窄）：原来第二轮会兜底扫**任意**兄弟插件目录，
+    // 别的插件的 config.properties（连着它的密钥和设置）可能被静默当成自己的用；
+    // 共享存储上谁都能建目录，等于把配置来源放开给所有人
+    for (int i = 0; i < fs.length; i++) {
+        if (!fs[i].isDirectory()) continue;
+        String sub = fs[i].getAbsolutePath();
+        boolean looksJev = sub.toLowerCase().indexOf("jev") >= 0;
+        if (!looksJev) continue;
+        addCand(l, sub + "/config.properties");
+        addCand(l, sub + "/config.properties.txt");
+        addCand(l, sub + "/config.txt");
     }
 }
 
@@ -203,6 +206,10 @@ void parseInto(Properties target, String text) {
         if (eq <= 0) continue;
         String k = ln.substring(0, eq).replace("\uFEFF", "").trim();
         String v = ln.substring(eq + 1).trim();
+        // 行内注释（"2000  # 说明"）剥掉：官方示例文件就长这样，用户照抄后
+        // parseInt 会被 "# 说明" 绊倒、静默落回默认值
+        int hash = v.indexOf('#');
+        if (hash >= 0) v = v.substring(0, hash).trim();
         if (v.length() > 1 && v.startsWith("\"") && v.endsWith("\"")) v = v.substring(1, v.length() - 1);
         target.setProperty(k, v);
     }
@@ -643,17 +650,31 @@ boolean allowed(String talker) {
  * 这段"选菜单"的时间足够把请求跑完。等真的点了「意图」，结果已经在手里，直接出。
  * 常见路径（点「意图」）总 API 调用次数不变；只有点了「关系＝…」才会白跑一次，可用设置关掉。
  */
+/**
+ * 预判缓存的键：会话 talker + 消息文本。
+ * 只按文本键会跨聊天串数据 —— 两个聊天里都有「好的」时，A 聊天预判的结果（带着 A 的关系和上下文）
+ * 会被 B 聊天直接拿去用。talker 取不到就退回纯文本（总比完全没有强）。
+ */
+String preKey(msg, String text) {
+    String talker = "";
+    try { talker = String.valueOf(msg.talker); } catch (Throwable ignore) { }
+    return talker + "|" + (text == null ? "" : text);
+}
+
 void prefetchStart(msg, String text) {
+    String key = null;
     try {
         if (!cfgBool("prefetch")) return;
         if (text == null || text.length() == 0) return;
         if (cfg("api_key").length() < 20) return;
-        Object old = preDone.get(text);
+        key = preKey(msg, text);
+        Object old = preDone.get(key);
         if (old != null) return;                        // 已经预判过同一条，别重复花钱
-        if (preBusy.get(text) != null) return;          // 正在跑
-        preBusy.put(text, String.valueOf(System.currentTimeMillis()));
+        if (preBusy.get(key) != null) return;           // 正在跑
+        preBusy.put(key, String.valueOf(System.currentTimeMillis()));
         final Object msgLocal = msg;
         final String textLocal = text;
+        final String keyLocal = key;
         new Thread(new Runnable() {
             public void run() {
                 try {
@@ -663,20 +684,27 @@ void prefetchStart(msg, String text) {
                     long t0 = System.currentTimeMillis();
                     String body = httpPost(cfg("endpoint"), cfg("api_key"), req, timeout);
                     long cost = System.currentTimeMillis() - t0;
-                    preDone.put(textLocal, body);
                     if (fieldAfter(body, "emotion", "choice").length() == 0) {
-                        preDone.remove(textLocal);          // 空答案不算数，留给正式流程重试
+                        log("JevIntent 预判拿到空答案，丢弃（留给正式流程重试）");
+                        return;
                     }
+                    // 上限兜底：长按了不点也会各占一条，不设限会随时间无限长大。
+                    // 这层是瞬态缓存，整锅倒掉最坏也就是下次多点一次重新请求
+                    if (preDone.size() >= PRE_MAX) { preDone.clear(); preDoneAt.clear(); }
+                    preDone.put(keyLocal, body);
+                    preDoneAt.put(keyLocal, String.valueOf(System.currentTimeMillis()));
                     log("JevIntent 预判完成 " + cost + "ms（握手 " + httpConnectMs
                         + "ms + 服务端 " + httpServerMs + "ms）");
                 } catch (Throwable t) {
                     log("JevIntent 预判失败（不影响正常流程）：" + brief(t));
                 } finally {
-                    preBusy.remove(textLocal);
+                    preBusy.remove(keyLocal);
                 }
             }
         }).start();
     } catch (Throwable t) {
+        // 线程没起来（或更早出错）时把闸门放掉，否则这条消息永远「预判中」、正式流程白等满超时
+        if (key != null) preBusy.remove(key);
         log("JevIntent.prefetchStart 出错：" + t);
     }
 }
@@ -684,20 +712,29 @@ void prefetchStart(msg, String text) {
 /**
  * 取预判结果：拿不到就返回 null（调用方走正常请求）。
  * 如果预判还在跑，最多等 waitMs —— 等它比自己再发一次请求更省。
+ * 键用 preKey(msg, text) 算出来的那个（会话|文本）；超过 PRE_TTL_MS 的旧结果当作没有。
  */
-String prefetchTake(String text, int waitMs) {
-    if (text == null || text.length() == 0) return null;
+String prefetchTake(String key, int waitMs) {
+    if (key == null || key.length() == 0) return null;
     String got = null;
     try {
         long t0 = System.currentTimeMillis();
         while (System.currentTimeMillis() - t0 < waitMs) {
-            Object v = preDone.get(text);
+            Object v = preDone.get(key);
             if (v != null) {
+                Object at = preDoneAt.get(key);
+                long age = 0L;
+                try { age = at == null ? 0L : Long.parseLong(String.valueOf(at)); } catch (Throwable ignore) { }
+                preDone.remove(key);
+                preDoneAt.remove(key);
+                if (age > 0L && System.currentTimeMillis() - age > PRE_TTL_MS) {
+                    log("JevIntent 预判结果已过期（超过 " + (PRE_TTL_MS / 1000) + "s），丢弃");
+                    break;                              // 过期：当作没预判过
+                }
                 got = String.valueOf(v);
-                preDone.remove(text);
                 break;
             }
-            if (preBusy.get(text) == null) break;        // 没在跑也没有结果 → 别等了
+            if (preBusy.get(key) == null) break;        // 没在跑也没有结果 → 别等了
             try { Thread.sleep(40); } catch (Throwable ignore) { }
         }
     } catch (Throwable t) {
@@ -755,14 +792,23 @@ analyzeAndSend(msg) {
     }
 
     // v1.9：缓存键只依赖"很便宜就能拿到"的东西，避免为了查缓存先跑一遍取上下文 host 调用
+    // v1.9.1：键补上显示设置与 endpoint —— 换了 emotion_top/显示开关/端点后，旧缓存不再顶上来
     String ck = msg.talker + "|" + text + "|" + presetOf("rel", msg.talker, cfg("rel_default"))
               + "|" + presetOf("sex", msg.talker, cfg("sex_default")) + "|" + ctxCount()
-              + "|" + cfg("model");
+              + "|" + cfg("model") + "|" + cfg("emotion_top")
+              + "|" + cfgBool("show_legacy") + "|" + cfgBool("show_confidence")
+              + "|" + cfg("endpoint");
     String cached = cacheGet(ck);
     if (cached != null) {
         toast("JevIntent：这条刚看过，直接给你");
         log("JevIntent 缓存命中：" + oneLine(cached));
-        sendResult(msg, cached);
+        // 弹结果必须离开菜单线程：sendResult 在 toast 模式下要按条睡 toast_gap_ms（最长 3s/条），
+        // 原来直接在菜单动作线程上调它，等于点一次「意图」卡住宿主 UI 好几秒
+        final Object msgHit = msg;
+        final String outHit = cached;
+        new Thread(new Runnable() {
+            public void run() { sendResult(msgHit, outHit); }
+        }).start();
         return;
     }
 
@@ -780,7 +826,7 @@ analyzeAndSend(msg) {
                 String out = null;
 
                 // ① 预判命中 → 直接排版（这是"长按完点一下秒出"的来源）
-                String pre = prefetchTake(textLocal, 2500);
+                String pre = prefetchTake(preKey(msgLocal, textLocal), 2500);
                 if (pre != null) {
                     lastFromPrefetch = true;
                     out = format(pre, textLocal, label);
@@ -1140,6 +1186,13 @@ String jsonStr(String s) {
 
 String httpPost(String urlStr, String key, String body, int timeoutMs) {
     if (key.length() == 0) throw new RuntimeException("config.properties 里没有 api_key");
+    // endpoint 必须走 https（内网自建中转除外）：http 明文会把密钥和聊天内容裸奔在链路上。
+    // 配置文件在共享存储上，谁能写它谁能换 endpoint —— 这里是最后一道闸
+    if (urlStr != null && urlStr.startsWith("http://") && !urlStr.startsWith("http://localhost")
+            && !urlStr.startsWith("http://127.") && !urlStr.startsWith("http://192.168.")
+            && !urlStr.startsWith("http://10.")) {
+        throw new RuntimeException("endpoint 拒绝明文 http（自建内网中转除外），改用 https：" + urlStr);
+    }
     HttpURLConnection c = null;
     String result = null;
     String err = null;
@@ -1187,8 +1240,12 @@ String readAll(InputStream in) {
     if (in == null) return "";
     BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"));
     StringBuilder sb = new StringBuilder();
+    int cap = 1024 * 1024;      // 响应是外部输入，无上限地读等于把 OOM 交给对面（正常响应 2~4KB）
     String line;
-    while ((line = r.readLine()) != null) sb.append(line).append('\n');
+    while ((line = r.readLine()) != null) {
+        sb.append(line).append('\n');
+        if (sb.length() > cap) break;
+    }
     r.close();
     return sb.toString();
 }
@@ -1209,11 +1266,15 @@ String fieldAfter(String json, String id, String field) {
     while (k < seg.length() && seg.charAt(k) == ' ') k++;
     if (k >= seg.length()) return "";
     StringBuilder out = new StringBuilder();
+    // 字符串分支里：转义对正好落在窗口末尾时直接停 —— 再 charAt(k+1) 会越界抛异常
     if (seg.charAt(k) == '"') {
         k++;
         while (k < seg.length()) {
             char c = seg.charAt(k);
-            if (c == '\\') { out.append(seg.charAt(k + 1)); k += 2; continue; }
+            if (c == '\\') {
+                if (k + 1 >= seg.length()) break;
+                out.append(seg.charAt(k + 1)); k += 2; continue;
+            }
             if (c == '"') break;
             out.append(c);
             k++;
